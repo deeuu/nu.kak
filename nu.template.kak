@@ -1,0 +1,168 @@
+# https://nu-lang.org/
+
+# Detection
+# ‾‾‾‾‾‾‾‾‾
+
+hook global BufCreate .*\.nu %{
+    set-option buffer filetype nu
+}
+
+# Initialization
+# ‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+
+hook global WinSetOption filetype=nu %{
+    require-module nu
+
+    set-option window static_words %opt{nu_static_words}
+
+    # trim trailingn whitespace when exiting insert
+    hook window ModeChange pop:insert:.* -group nu-trim-indent nu-trim-indent
+    # Apply indentation rules
+    hook window InsertChar .* -group nu-indent nu-indent-on-char
+    hook window InsertChar \n -group nu-indent nu-indent-on-new-line
+
+    hook -once -always window WinSetOption filetype=.* %{ remove-hooks window nu-.+ }
+}
+
+hook -group nu-highlight global WinSetOption filetype=nu %{
+    add-highlighter window/nu ref nu
+    hook -once -always window WinSetOption filetype=.* %{ remove-highlighter window/nu }
+}
+
+provide-module nu %@
+
+# Highlighters
+# ‾‾‾‾‾‾‾‾‾‾‾‾
+
+add-highlighter shared/nu regions
+add-highlighter shared/nu/code default-region group
+
+# Comments
+add-highlighter shared/nu/comment region '#' '$' fill comment
+add-highlighter shared/nu/code/ regex '#.*?$' 0:comment
+
+# Strings
+add-highlighter shared/nu/double_string region '"' '(?<!\\)(\\\\)*"' fill string
+add-highlighter shared/nu/single_string region "'" "(?<!\\)(\\\\)*'" fill string
+add-highlighter shared/nu/raw_string  region -match-capture %{(?<!')r(#*)'} %{'(#*)} fill string
+add-highlighter shared/nu/backtick_string region "`" "`" fill string
+
+add-highlighter shared/nu/$_double_string  region '\$"' '(?<!\\)(\\\\)*"'  regions
+add-highlighter shared/nu/$_double_string/ default-region fill string
+add-highlighter shared/nu/$_double_string/ region '\(' '\)' ref nu
+
+add-highlighter shared/nu/$_single_string  region "\$'" "(?<!\\)(\\\\)*'" regions
+add-highlighter shared/nu/$_single_string/ default-region fill string
+add-highlighter shared/nu/$_single_string/ region '\(' '\)' ref nu
+
+# function delcaration
+# treat as string for consistency with string function declaration, i.e. def "cmd subcmd" []
+add-highlighter shared/nu/code/function_declaration regex (?:def\h+)(\w+)\h+\[ 1:string
+
+# Variables
+add-highlighter shared/nu/code/ regex '\$[\w\-]+' 0:variable
+
+# Flag parameters
+add-highlighter shared/nu/code/ regex '--[\w\-]+' 0:module
+add-highlighter shared/nu/code/ regex '-[a-zA-Z]' 0:module
+
+# Command blocks or closures
+add-highlighter shared/nu/code/ regex '\{' 0:delimiter
+add-highlighter shared/nu/code/ regex '\}' 0:delimiter
+
+# Brackets and parentheses
+add-highlighter shared/nu/code/ regex '[\[\]\(\)]' 0:delimiter
+
+add-highlighter shared/nu/code/question_mark regex \? 0:meta
+
+add-highlighter shared/nu/code/modules regex 'use\s+([\w+/?]+)' 0:meta
+
+# units
+add-highlighter shared/nu/code/ regex '\b([0-9_]\.?)(ns|us|ms|sec|min|hr|day|wk)\b' 2:meta
+add-highlighter shared/nu/code/ regex '\b([0-9_]\.?)((k|K|m|M|g|G|t|T|p|P|e|E)?(b|B))\b' 2:meta
+
+# Numbers
+add-highlighter shared/nu/code/ regex '\b[-+]?[_0-9]+(\.[_0-9]+)?' 0:value
+add-highlighter shared/nu/code/ regex '\b[-+]?\.[_0-9]+' 0:value
+
+add-highlighter shared/nu/code/ regex '\b(0x[0-9a-fA-F_]+)' 0:value
+add-highlighter shared/nu/code/ regex '\b(0x\[[0-9a-fA-F\s]+\])' 0:value
+
+add-highlighter shared/nu/code/ regex '\b(0o[_0-7]+)' 0:value
+add-highlighter shared/nu/code/ regex '\b(0o\[[0-7\s]+\])' 0:value
+
+add-highlighter shared/nu/code/ regex '\b(0b[_01]+)' 0:value
+add-highlighter shared/nu/code/ regex '\b(0b\[[01\s]+\])' 0:value
+
+# Operators
+add-highlighter shared/nu/code/operators regex \s+((!=)|(<=?)|(>=?)|(=[~=]?)|(!~)|(\+[\+=]?)|(-=?)|(\*[\*=]?)|(/[=/]?)|(\+\+=))\s+ 0:operator
+
+evaluate-commands %sh{
+    # Grammar
+    keywords="{{ NU_KEYWORDS }}"
+    operators="{{ NU_OPERATORS }}"
+    commands="{{ NU_COMMANDS }}"
+
+    types="string int float bool table duration date list block closure nothing range binary record null filesize any"
+
+    values="false true"
+
+    join() { sep=$2; set -- $1; IFS="$sep"; echo "$*"; }
+
+    static_words="$(join "${keywords} ${operators} ${commands} ${types} ${values}" ' ')"
+
+    # Add the language's grammar to the static completion list
+    printf %s\\n "declare-option str-list nu_static_words ${static_words}"
+
+    types="$(join "${types}" '|')"
+    values="$(join "${values}" '|')"
+    keywords_re="{{ NU_KEYWORDS_RE }}"
+    operators_re="{{ NU_OPERATORS_RE }}"
+    commands_re="{{ NU_COMMANDS_RE }}"
+
+    # Highlight keywords
+    printf %s "
+        add-highlighter shared/nu/code/ regex ${keywords_re} 0:keyword
+        add-highlighter shared/nu/code/ regex ${commands_re} 0:builtin
+        add-highlighter shared/nu/code/ regex ${operators_re} 0:operator
+        add-highlighter shared/nu/code/ regex \b(${types})\b 0:type
+        add-highlighter shared/nu/code/ regex \b(${values})\b 0:value
+    "
+}
+
+# Commands
+
+define-command -hidden nu-trim-indent %{
+    # remove trailing white spaces
+    try %{ execute-keys -draft -itersel x s \h+$ <ret> d }
+}
+
+define-command -hidden nu-insert-on-new-line %{
+    evaluate-commands -draft -itersel %{
+        # copy '#' comment prefix and following white spaces
+        try %{ exec -draft k x s ^\h*#\h* <ret> y jgh P }
+    }
+}
+
+define-command -hidden nu-indent-on-char %<
+    evaluate-commands -draft -itersel %<
+        # align closer token to its opener when alone on a line
+        try %< execute-keys -draft <a-h> <a-k> ^\h+[\]})]$ <ret> m <a-S> 1<a-&> >
+    >
+>
+
+define-command -hidden nu-indent-on-new-line %<
+    evaluate-commands -draft -itersel %<
+        # preserve previous line indent
+        try %{ exec -draft <semicolon> K <a-&> }
+
+        # cleanup trailing whitespaces from previous line
+        try %{ execute-keys -draft k : nu-trim-indent <ret> }
+        # indent after lines ending with opener token
+        try %< execute-keys -draft k x <a-k> [[{(]\h*$ <ret> j <a-gt> >
+        # deindent closer token(s) when after cursor
+        try %< execute-keys -draft x <a-k> ^\h*[}\])] <ret> gh / [}\])] <ret> m <a-S> 1<a-&> >
+    >
+>
+
+@
